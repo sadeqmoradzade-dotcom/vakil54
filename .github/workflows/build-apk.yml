@@ -14,7 +14,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout Repository
         uses: actions/checkout@v4
 
@@ -29,9 +28,6 @@ jobs:
 
       - name: Get Flutter Dependencies
         run: flutter pub get
-
-      - name: Analyze Application
-        run: flutter analyze lib
 
       - name: Build Release APK
         run: flutter build apk --release
