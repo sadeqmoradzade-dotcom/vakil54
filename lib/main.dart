@@ -28,13 +28,11 @@ class VakilApp extends StatelessWidget {
 class LawItem {
   final String title;
   final String date;
-  final String type;
   final String link;
 
   const LawItem({
     required this.title,
     required this.date,
-    required this.type,
     required this.link,
   });
 }
@@ -49,21 +47,15 @@ class SearchPage extends StatefulWidget {
 class _SearchPageState extends State<SearchPage> {
   static const String baseUrl = 'https://rc.majlis.ir';
 
-  static const String searchPage =
-      '$baseUrl/fa/law/search';
-
-  static const String ajaxPage =
-      '$baseUrl/fa/search/searchAjax';
-
   final TextEditingController searchController =
       TextEditingController();
 
   late final WebViewController webController;
 
+  bool pageReady = false;
   bool searching = false;
 
-  String status =
-      'در حال اتصال به سامانه مجلس...';
+  String status = 'در حال آماده‌سازی...';
 
   List<LawItem> items = <LawItem>[];
 
@@ -80,214 +72,134 @@ class _SearchPageState extends State<SearchPage> {
           onPageFinished: (String url) {
             if (!mounted) return;
 
-            if (!searching) {
-              setState(() {
-                status =
-                    'عبارت موردنظر را وارد کنید';
-              });
-            }
-          },
-          onWebResourceError:
-              (WebResourceError error) {
-            if (!mounted) return;
-
             setState(() {
-              status =
-                  'اتصال به سامانه مجلس برقرار نشد';
+              pageReady = true;
+
+              if (!searching) {
+                status = 'عبارت موردنظر را وارد کنید';
+              }
             });
+          },
+
+          // عمداً چیزی اینجا نمایش نمی‌دهیم.
+          // خطای یک فایل جانبی سایت نباید کل برنامه را خطادار کند.
+          onWebResourceError: (WebResourceError error) {
+            // ignore
           },
         ),
       )
       ..loadRequest(
-        Uri.parse(searchPage),
+        Uri.parse('$baseUrl/fa/law/search'),
       );
   }
 
-  Future<Map<String, dynamic>> _ajaxSearch(
-    String term,
-  ) async {
-    final String safeTerm =
-        jsonEncode(term);
-
+  Future<List<LawItem>> readResults() async {
     final Object? result =
-        await webController
-            .runJavaScriptReturningResult(
+        await webController.runJavaScriptReturningResult(
       '''
 (() => {
-  return new Promise((resolve) => {
-    try {
-      const xhr = new XMLHttpRequest();
+  try {
+    const links = Array.from(
+      document.querySelectorAll(
+        'a[href*="/fa/law/show/"]'
+      )
+    );
 
-      const url =
-        '$ajaxPage'
-        + '?q=' + encodeURIComponent($safeTerm)
-        + '&report=0'
-        + '&news=0'
-        + '&legal=0'
-        + '&agenda=0'
-        + '&law=1';
+    return JSON.stringify(
+      links.slice(0, 100).map((a) => {
+        const row =
+          a.closest("tr") ||
+          a.closest(".card") ||
+          a.parentElement;
 
-      xhr.open('GET', url, true);
+        const text = row
+          ? (
+              row.innerText ||
+              row.textContent ||
+              ""
+            ).replace(/\\\\s+/g, " ").trim()
+          : "";
 
-      xhr.setRequestHeader(
-        'X-Requested-With',
-        'XMLHttpRequest'
-      );
+        return {
+          title:
+            (
+              a.innerText ||
+              a.textContent ||
+              ""
+            ).trim(),
 
-      xhr.setRequestHeader(
-        'Accept',
-        'application/json, text/plain, */*'
-      );
+          link:
+            a.href || "",
 
-      xhr.onreadystatechange = function() {
-        if (xhr.readyState === 4) {
-          resolve(
-            JSON.stringify({
-              "status": xhr.status,
-              "text": xhr.responseText || ""
-            })
-          );
-        }
-      };
-
-      xhr.onerror = function() {
-        resolve(
-          JSON.stringify({
-            "status": 0,
-            "text": "",
-            "error": "XHR_ERROR"
-          })
-        );
-      };
-
-      xhr.ontimeout = function() {
-        resolve(
-          JSON.stringify({
-            "status": 0,
-            "text": "",
-            "error": "TIMEOUT"
-          })
-        );
-      };
-
-      xhr.timeout = 20000;
-
-      xhr.send();
-    } catch (e) {
-      resolve(
-        JSON.stringify({
-          "status": 0,
-          "text": "",
-          "error": String(e)
-        })
-      );
-    }
-  });
+          text: text
+        };
+      })
+    );
+  } catch (e) {
+    return "[]";
+  }
 })()
 ''',
     );
 
-    String resultText =
-        result?.toString() ?? '';
+    String text = result?.toString() ?? '[]';
 
-    if (resultText.startsWith('"') &&
-        resultText.endsWith('"')) {
+    if (text.startsWith('"') &&
+        text.endsWith('"')) {
       try {
-        resultText =
-            jsonDecode(resultText) as String;
+        text = jsonDecode(text) as String;
       } catch (_) {}
     }
 
-    final dynamic decoded =
-        jsonDecode(resultText);
-
-    if (decoded is Map) {
-      return Map<String, dynamic>.from(
-        decoded,
-      );
-    }
-
-    return <String, dynamic>{};
-  }
-
-  List<LawItem> _parseResults(
-    String response,
-  ) {
-    final List<LawItem> parsed =
-        <LawItem>[];
-
-    if (response.trim().isEmpty) {
-      return parsed;
-    }
-
-    dynamic data;
-
     try {
-      data = jsonDecode(response);
+      final dynamic decoded = jsonDecode(text);
+
+      if (decoded is! List) {
+        return <LawItem>[];
+      }
+
+      final List<LawItem> resultItems =
+          <LawItem>[];
+
+      for (final dynamic row in decoded) {
+        if (row is! Map) {
+          continue;
+        }
+
+        final String title =
+            row['title']?.toString().trim() ?? '';
+
+        String link =
+            row['link']?.toString().trim() ?? '';
+
+        final String rowText =
+            row['text']?.toString() ?? '';
+
+        if (title.isEmpty || link.isEmpty) {
+          continue;
+        }
+
+        if (link.startsWith('/')) {
+          link = '$baseUrl$link';
+        }
+
+        final Match? dateMatch = RegExp(
+          r'1\d{3}/\d{1,2}/\d{1,2}',
+        ).firstMatch(rowText);
+
+        resultItems.add(
+          LawItem(
+            title: title,
+            date: dateMatch?.group(0) ?? '',
+            link: link,
+          ),
+        );
+      }
+
+      return resultItems;
     } catch (_) {
-      return parsed;
+      return <LawItem>[];
     }
-
-    if (data is! Map) {
-      return parsed;
-    }
-
-    final dynamic result =
-        data['result'];
-
-    if (result is! List) {
-      return parsed;
-    }
-
-    for (final dynamic row in result) {
-      if (row is! Map) {
-        continue;
-      }
-
-      final String title =
-          row['title']
-                  ?.toString()
-                  .trim() ??
-              '';
-
-      String link =
-          row['link']
-                  ?.toString()
-                  .trim() ??
-              '';
-
-      final String date =
-          row['date_fa']
-                  ?.toString()
-                  .trim() ??
-              '';
-
-      final String type =
-          row['tbl_value']
-                  ?.toString()
-                  .trim() ??
-              '';
-
-      if (title.isEmpty ||
-          link.isEmpty) {
-        continue;
-      }
-
-      if (link.startsWith('/')) {
-        link = '$baseUrl$link';
-      }
-
-      parsed.add(
-        LawItem(
-          title: title,
-          date: date,
-          type: type,
-          link: link,
-        ),
-      );
-    }
-
-    return parsed;
   }
 
   Future<void> search() async {
@@ -296,8 +208,7 @@ class _SearchPageState extends State<SearchPage> {
 
     if (term.isEmpty) {
       setState(() {
-        status =
-            'عبارت جستجو را وارد کنید';
+        status = 'عبارت جستجو را وارد کنید';
         items = <LawItem>[];
       });
       return;
@@ -305,8 +216,7 @@ class _SearchPageState extends State<SearchPage> {
 
     if (term.length < 2) {
       setState(() {
-        status =
-            'حداقل ۲ حرف وارد کنید';
+        status = 'حداقل ۲ حرف وارد کنید';
         items = <LawItem>[];
       });
       return;
@@ -315,88 +225,67 @@ class _SearchPageState extends State<SearchPage> {
     setState(() {
       searching = true;
       items = <LawItem>[];
-      status = 'در حال جستجو...';
+      status = 'در حال جستجوی «$term»...';
     });
 
     try {
-      /*
-       * اول مطمئن می‌شویم صفحه اصلی سایت
-       * داخل WebView باز شده باشد.
-       */
+      final String encoded =
+          Uri.encodeQueryComponent(term);
+
+      final String url =
+          '$baseUrl/fa/law/search'
+          '?keyword=$encoded'
+          '&only_title=0'
+          '&lu_approve_reference='
+          '&from_app_date='
+          '&to_app_date='
+          '&from_communique_date='
+          '&to_communique_date='
+          '&communique_no='
+          '&lu_parliament_year='
+          '&lu_biannual='
+          '&o='
+          '&ot=d';
+
       await webController.loadRequest(
-        Uri.parse(searchPage),
+        Uri.parse(url),
       );
 
-      await Future<void>.delayed(
-        const Duration(seconds: 3),
-      );
+      // تا 20 ثانیه برای ظاهر شدن نتایج صبر می‌کنیم.
+      List<LawItem> results =
+          <LawItem>[];
 
-      final Map<String, dynamic> ajax =
-          await _ajaxSearch(term);
-
-      final int httpStatus =
-          int.tryParse(
-                ajax['status']
-                        ?.toString() ??
-                    '0',
-              ) ??
-              0;
-
-      final String response =
-          ajax['text']
-                  ?.toString() ??
-              '';
-
-      final String jsError =
-          ajax['error']
-                  ?.toString() ??
-              '';
-
-      if (httpStatus == 0) {
-        throw Exception(
-          jsError.isEmpty
-              ? 'ارتباط XHR با سامانه برقرار نشد'
-              : jsError,
+      for (int i = 0; i < 20; i++) {
+        await Future<void>.delayed(
+          const Duration(seconds: 1),
         );
-      }
 
-      if (httpStatus < 200 ||
-          httpStatus >= 300) {
-        throw Exception(
-          'سرور سامانه کد $httpStatus برگرداند',
-        );
-      }
+        results = await readResults();
 
-      if (response.isEmpty) {
-        throw Exception(
-          'پاسخ خالی از سامانه دریافت شد',
-        );
+        if (results.isNotEmpty) {
+          break;
+        }
       }
-
-      final List<LawItem> parsed =
-          _parseResults(response);
 
       if (!mounted) return;
 
       setState(() {
-        items = parsed;
+        items = results;
 
-        if (parsed.isEmpty) {
+        if (results.isEmpty) {
           status =
               'برای «$term» نتیجه‌ای پیدا نشد';
         } else {
           status =
-              '${parsed.length} نتیجه پیدا شد';
+              '${results.length} نتیجه پیدا شد';
         }
       });
     } catch (e) {
       if (!mounted) return;
 
       setState(() {
-        items = <LawItem>[];
-
         status =
-            'خطا در دریافت اطلاعات\n$e';
+            'خطا در جستجو\n$e';
       });
     } finally {
       if (!mounted) return;
@@ -459,8 +348,7 @@ class _SearchPageState extends State<SearchPage> {
                           searchController,
                       textInputAction:
                           TextInputAction.search,
-                      onSubmitted: (_) =>
-                          search(),
+                      onSubmitted: (_) => search(),
                       decoration:
                           InputDecoration(
                         hintText:
@@ -502,9 +390,7 @@ class _SearchPageState extends State<SearchPage> {
                     ),
                   ),
 
-                  const SizedBox(
-                    height: 10,
-                  ),
+                  const SizedBox(height: 10),
 
                   Expanded(
                     child: searching
@@ -534,23 +420,16 @@ class _SearchPageState extends State<SearchPage> {
                                 itemCount:
                                     items.length,
                                 separatorBuilder:
-                                    (
-                                  context,
-                                  index,
-                                ) =>
+                                    (context, index) =>
                                         const SizedBox(
                                   height: 8,
                                 ),
                                 itemBuilder:
-                                    (
-                                  context,
-                                  index,
-                                ) {
+                                    (context, index) {
                                   final LawItem item =
                                       items[index];
 
                                   return Card(
-                                    elevation: 2,
                                     child:
                                         ListTile(
                                       title:
@@ -560,37 +439,14 @@ class _SearchPageState extends State<SearchPage> {
                                             const TextStyle(
                                           fontWeight:
                                               FontWeight.bold,
-                                          fontSize: 16,
                                         ),
                                       ),
                                       subtitle:
-                                          Padding(
-                                        padding:
-                                            const EdgeInsets
-                                                .only(
-                                          top: 8,
-                                        ),
-                                        child:
-                                            Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment
-                                                  .start,
-                                          children: [
-                                            if (item
-                                                .date
-                                                .isNotEmpty)
-                                              Text(
-                                                'تاریخ: ${item.date}',
-                                              ),
-                                            if (item
-                                                .type
-                                                .isNotEmpty)
-                                              Text(
-                                                'نوع: ${item.type}',
-                                              ),
-                                          ],
-                                        ),
-                                      ),
+                                          item.date.isEmpty
+                                              ? null
+                                              : Text(
+                                                  'تاریخ: ${item.date}',
+                                                ),
                                       trailing:
                                           const Icon(
                                         Icons
@@ -661,11 +517,7 @@ class _LawPageState extends State<LawPage> {
           },
           onWebResourceError:
               (WebResourceError error) {
-            if (!mounted) return;
-
-            setState(() {
-              loading = false;
-            });
+            // خطاهای منابع جانبی را نادیده می‌گیریم.
           },
         ),
       )
