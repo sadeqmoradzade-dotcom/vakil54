@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:html' as html;
 
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -28,11 +29,13 @@ class VakilApp extends StatelessWidget {
 class LawItem {
   final String title;
   final String date;
+  final String type;
   final String link;
 
   const LawItem({
     required this.title,
     required this.date,
+    required this.type,
     required this.link,
   });
 }
@@ -46,16 +49,17 @@ class SearchPage extends StatefulWidget {
 
 class _SearchPageState extends State<SearchPage> {
   static const String baseUrl = 'https://rc.majlis.ir';
+  static const String ajaxUrl =
+      '$baseUrl/fa/search/searchAjax';
 
   final TextEditingController searchController =
       TextEditingController();
 
   late final WebViewController webController;
 
-  bool pageReady = false;
   bool searching = false;
 
-  String status = 'در حال آماده‌سازی...';
+  String status = 'عبارت موردنظر را وارد کنید';
 
   List<LawItem> items = <LawItem>[];
 
@@ -72,77 +76,69 @@ class _SearchPageState extends State<SearchPage> {
           onPageFinished: (String url) {
             if (!mounted) return;
 
-            setState(() {
-              pageReady = true;
-
-              if (!searching) {
-                status = 'عبارت موردنظر را وارد کنید';
-              }
-            });
-          },
-
-          // عمداً چیزی اینجا نمایش نمی‌دهیم.
-          // خطای یک فایل جانبی سایت نباید کل برنامه را خطادار کند.
-          onWebResourceError: (WebResourceError error) {
-            // ignore
+            if (!searching) {
+              setState(() {
+                status =
+                    'عبارت موردنظر را وارد کنید';
+              });
+            }
           },
         ),
       )
       ..loadRequest(
-        Uri.parse('$baseUrl/fa/law/search'),
+        Uri.parse(
+          '$baseUrl/fa/law/search',
+        ),
       );
   }
 
-  Future<List<LawItem>> readResults() async {
-    final Object? result =
-        await webController.runJavaScriptReturningResult(
+  Future<List<LawItem>> getResults(
+    String term,
+  ) async {
+    final String encoded =
+        Uri.encodeQueryComponent(term);
+
+    final String url =
+        '$ajaxUrl'
+        '?q=$encoded'
+        '&report=0'
+        '&news=0'
+        '&legal=0'
+        '&agenda=0'
+        '&law=1';
+
+    await webController.loadRequest(
+      Uri.parse(url),
+    );
+
+    await Future<void>.delayed(
+      const Duration(seconds: 3),
+    );
+
+    final Object? jsResult =
+        await webController
+            .runJavaScriptReturningResult(
       '''
 (() => {
   try {
-    const links = Array.from(
-      document.querySelectorAll(
-        'a[href*="/fa/law/show/"]'
-      )
-    );
+    const body = document.body;
 
-    return JSON.stringify(
-      links.slice(0, 100).map((a) => {
-        const row =
-          a.closest("tr") ||
-          a.closest(".card") ||
-          a.parentElement;
+    if (!body) {
+      return "";
+    }
 
-        const text = row
-          ? (
-              row.innerText ||
-              row.textContent ||
-              ""
-            ).replace(/\\\\s+/g, " ").trim()
-          : "";
-
-        return {
-          title:
-            (
-              a.innerText ||
-              a.textContent ||
-              ""
-            ).trim(),
-
-          link:
-            a.href || "",
-
-          text: text
-        };
-      })
-    );
+    return body.innerText ||
+           body.textContent ||
+           "";
   } catch (e) {
-    return "[]";
+    return "";
   }
 })()
 ''',
     );
 
-    String text = result?.toString() ?? '[]';
+    String text =
+        jsResult?.toString() ?? '';
 
     if (text.startsWith('"') &&
         text.endsWith('"')) {
@@ -151,55 +147,259 @@ class _SearchPageState extends State<SearchPage> {
       } catch (_) {}
     }
 
-    try {
-      final dynamic decoded = jsonDecode(text);
+    text = text.trim();
 
-      if (decoded is! List) {
-        return <LawItem>[];
-      }
-
-      final List<LawItem> resultItems =
-          <LawItem>[];
-
-      for (final dynamic row in decoded) {
-        if (row is! Map) {
-          continue;
-        }
-
-        final String title =
-            row['title']?.toString().trim() ?? '';
-
-        String link =
-            row['link']?.toString().trim() ?? '';
-
-        final String rowText =
-            row['text']?.toString() ?? '';
-
-        if (title.isEmpty || link.isEmpty) {
-          continue;
-        }
-
-        if (link.startsWith('/')) {
-          link = '$baseUrl$link';
-        }
-
-        final Match? dateMatch = RegExp(
-          r'1\d{3}/\d{1,2}/\d{1,2}',
-        ).firstMatch(rowText);
-
-        resultItems.add(
-          LawItem(
-            title: title,
-            date: dateMatch?.group(0) ?? '',
-            link: link,
-          ),
-        );
-      }
-
-      return resultItems;
-    } catch (_) {
-      return <LawItem>[];
+    if (text.isEmpty) {
+      throw Exception(
+        'پاسخ خالی از سامانه',
+      );
     }
+
+    /*
+     * حالت اول:
+     * پاسخ مستقیماً JSON است.
+     */
+    try {
+      final dynamic data =
+          jsonDecode(text);
+
+      return _parseJson(data);
+    } catch (_) {
+      // ادامه می‌دهیم؛ ممکن است متن JSON
+      // داخل <pre> یا متن صفحه باشد.
+    }
+
+    /*
+     * حالت دوم:
+     * پیدا کردن اولین بلوک JSON
+     * داخل پاسخ.
+     */
+    final int jsonStart =
+        text.indexOf('{');
+
+    final int jsonEnd =
+        text.lastIndexOf('}');
+
+    if (jsonStart >= 0 &&
+        jsonEnd > jsonStart) {
+      final String jsonPart =
+          text.substring(
+        jsonStart,
+        jsonEnd + 1,
+      );
+
+      try {
+        final dynamic data =
+            jsonDecode(jsonPart);
+
+        return _parseJson(data);
+      } catch (_) {}
+    }
+
+    /*
+     * حالت سوم:
+     * پاسخ ممکن است به شکل جدول
+     * متنی/Markdown برگشته باشد.
+     */
+    return _parseTextResponse(text);
+  }
+
+  List<LawItem> _parseJson(
+    dynamic data,
+  ) {
+    final List<LawItem> output =
+        <LawItem>[];
+
+    if (data is! Map) {
+      return output;
+    }
+
+    final dynamic result =
+        data['result'];
+
+    if (result is! List) {
+      return output;
+    }
+
+    for (final dynamic row in result) {
+      if (row is! Map) {
+        continue;
+      }
+
+      final String title =
+          row['pure_title']?.toString().trim() ??
+              row['title']?.toString().trim() ??
+              '';
+
+      String link =
+          row['link']?.toString().trim() ?? '';
+
+      final String date =
+          row['date_fa']?.toString().trim() ?? '';
+
+      final String type =
+          row['tbl_value']?.toString().trim() ?? '';
+
+      if (title.isEmpty ||
+          link.isEmpty) {
+        continue;
+      }
+
+      /*
+       * اگر لینک به شکل Markdown آمده باشد:
+       * [https://...](https://...)
+       */
+      final RegExp markdownLink =
+          RegExp(
+        r'\]\((https?://[^)\s]+)',
+      );
+
+      final Match? match =
+          markdownLink.firstMatch(link);
+
+      if (match != null) {
+        link =
+            match.group(1) ?? link;
+      }
+
+      if (link.startsWith('/')) {
+        link = '$baseUrl$link';
+      }
+
+      output.add(
+        LawItem(
+          title: _cleanHtml(title),
+          date: date,
+          type: type,
+          link: link,
+        ),
+      );
+    }
+
+    return output;
+  }
+
+  List<LawItem> _parseTextResponse(
+    String text,
+  ) {
+    final List<LawItem> output =
+        <LawItem>[];
+
+    /*
+     * پاسخ تست واقعی سایت شامل خطوطی
+     * مثل:
+     *
+     * title | ...
+     * date_fa | ...
+     * link | ...
+     *
+     * است. این parser تلاش می‌کند
+     * از همان متن اطلاعات را بردارد.
+     */
+
+    final RegExp blockRegex = RegExp(
+      r'oid\s*\|.*?\n'
+      r'title\s*\|\s*(.*?)\n'
+      r'date\s*\|\s*(.*?)\n'
+      r'tbl_value\s*\|\s*(.*?)\n'
+      r'tbl_index\s*\|\s*(.*?)\n'
+      r'pure_title\s*\|\s*(.*?)\n'
+      r'date_fa\s*\|\s*"?(.*?)"?\n'
+      r'link\s*\|\s*.*?https?://rc\.majlis\.ir/fa/[^)\s]+',
+      multiLine: true,
+      dotAll: true,
+    );
+
+    for (final Match match
+        in blockRegex.allMatches(text)) {
+      String title =
+          match.group(6)?.trim() ?? '';
+
+      final String date =
+          match.group(7)?.trim() ?? '';
+
+      String fullBlock =
+          match.group(0) ?? '';
+
+      final RegExp linkRegex = RegExp(
+        r'https?://rc\.majlis\.ir/fa/(?:law|news|legal|agenda)/show/\d+',
+      );
+
+      final Match? linkMatch =
+          linkRegex.firstMatch(fullBlock);
+
+      String link =
+          linkMatch?.group(0) ?? '';
+
+      title = _cleanHtml(
+        _stripQuotes(title),
+      );
+
+      if (title.isEmpty ||
+          link.isEmpty) {
+        continue;
+      }
+
+      output.add(
+        LawItem(
+          title: title,
+          date: date.replaceAll('"', ''),
+          type: 'قانون',
+          link: link,
+        ),
+      );
+    }
+
+    return output;
+  }
+
+  String _stripQuotes(String value) {
+    String result = value.trim();
+
+    if (result.startsWith("'") &&
+        result.endsWith("'")) {
+      result =
+          result.substring(
+        1,
+        result.length - 1,
+      );
+    }
+
+    if (result.startsWith('"') &&
+        result.endsWith('"')) {
+      result =
+          result.substring(
+        1,
+        result.length - 1,
+      );
+    }
+
+    return result;
+  }
+
+  String _cleanHtml(String value) {
+    return value
+        .replaceAll(
+          RegExp(r'<[^>]*>'),
+          '',
+        )
+        .replaceAll(
+          '&nbsp;',
+          ' ',
+        )
+        .replaceAll(
+          '&quot;',
+          '"',
+        )
+        .replaceAll(
+          '&amp;',
+          '&',
+        )
+        .replaceAll(
+          RegExp(r'\s+'),
+          ' ',
+        )
+        .trim();
   }
 
   Future<void> search() async {
@@ -208,16 +408,18 @@ class _SearchPageState extends State<SearchPage> {
 
     if (term.isEmpty) {
       setState(() {
-        status = 'عبارت جستجو را وارد کنید';
         items = <LawItem>[];
+        status =
+            'عبارت جستجو را وارد کنید';
       });
       return;
     }
 
     if (term.length < 2) {
       setState(() {
-        status = 'حداقل ۲ حرف وارد کنید';
         items = <LawItem>[];
+        status =
+            'حداقل ۲ حرف وارد کنید';
       });
       return;
     }
@@ -225,47 +427,13 @@ class _SearchPageState extends State<SearchPage> {
     setState(() {
       searching = true;
       items = <LawItem>[];
-      status = 'در حال جستجوی «$term»...';
+      status =
+          'در حال جستجو برای «$term»...';
     });
 
     try {
-      final String encoded =
-          Uri.encodeQueryComponent(term);
-
-      final String url =
-          '$baseUrl/fa/law/search'
-          '?keyword=$encoded'
-          '&only_title=0'
-          '&lu_approve_reference='
-          '&from_app_date='
-          '&to_app_date='
-          '&from_communique_date='
-          '&to_communique_date='
-          '&communique_no='
-          '&lu_parliament_year='
-          '&lu_biannual='
-          '&o='
-          '&ot=d';
-
-      await webController.loadRequest(
-        Uri.parse(url),
-      );
-
-      // تا 20 ثانیه برای ظاهر شدن نتایج صبر می‌کنیم.
-      List<LawItem> results =
-          <LawItem>[];
-
-      for (int i = 0; i < 20; i++) {
-        await Future<void>.delayed(
-          const Duration(seconds: 1),
-        );
-
-        results = await readResults();
-
-        if (results.isNotEmpty) {
-          break;
-        }
-      }
+      final List<LawItem> results =
+          await getResults(term);
 
       if (!mounted) return;
 
@@ -284,8 +452,9 @@ class _SearchPageState extends State<SearchPage> {
       if (!mounted) return;
 
       setState(() {
+        items = <LawItem>[];
         status =
-            'خطا در جستجو\n$e';
+            'خطا در دریافت اطلاعات\n$e';
       });
     } finally {
       if (!mounted) return;
@@ -297,7 +466,8 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   void openLaw(LawItem item) {
-    Navigator.of(context).push(
+    Navigator.push(
+      context,
       MaterialPageRoute(
         builder: (context) => LawPage(
           title: item.title,
@@ -328,31 +498,37 @@ class _SearchPageState extends State<SearchPage> {
               child: IgnorePointer(
                 child: Opacity(
                   opacity: 0.01,
-                  child: WebViewWidget(
-                    controller: webController,
+                  child:
+                      WebViewWidget(
+                    controller:
+                        webController,
                   ),
                 ),
               ),
             ),
 
             Container(
-              color: Theme.of(context)
-                  .scaffoldBackgroundColor,
+              color:
+                  Theme.of(context)
+                      .scaffoldBackgroundColor,
               child: Column(
                 children: [
                   Padding(
                     padding:
-                        const EdgeInsets.all(16),
+                        const EdgeInsets.all(
+                      16,
+                    ),
                     child: TextField(
                       controller:
                           searchController,
                       textInputAction:
                           TextInputAction.search,
-                      onSubmitted: (_) => search(),
+                      onSubmitted:
+                          (_) => search(),
                       decoration:
                           InputDecoration(
                         hintText:
-                            'مثلاً مهندس ناظر',
+                            'مثلاً مهندس',
                         prefixIcon:
                             const Icon(
                           Icons.search,
@@ -390,7 +566,9 @@ class _SearchPageState extends State<SearchPage> {
                     ),
                   ),
 
-                  const SizedBox(height: 10),
+                  const SizedBox(
+                    height: 10,
+                  ),
 
                   Expanded(
                     child: searching
@@ -400,7 +578,8 @@ class _SearchPageState extends State<SearchPage> {
                           )
                         : items.isEmpty
                             ? Center(
-                                child: Padding(
+                                child:
+                                    Padding(
                                   padding:
                                       const EdgeInsets.all(
                                     24,
@@ -420,16 +599,24 @@ class _SearchPageState extends State<SearchPage> {
                                 itemCount:
                                     items.length,
                                 separatorBuilder:
-                                    (context, index) =>
+                                    (
+                                  context,
+                                  index,
+                                ) =>
                                         const SizedBox(
                                   height: 8,
                                 ),
                                 itemBuilder:
-                                    (context, index) {
-                                  final LawItem item =
+                                    (
+                                  context,
+                                  index,
+                                ) {
+                                  final LawItem
+                                      item =
                                       items[index];
 
                                   return Card(
+                                    elevation: 2,
                                     child:
                                         ListTile(
                                       title:
@@ -439,21 +626,42 @@ class _SearchPageState extends State<SearchPage> {
                                             const TextStyle(
                                           fontWeight:
                                               FontWeight.bold,
+                                          fontSize:
+                                              16,
                                         ),
                                       ),
                                       subtitle:
-                                          item.date.isEmpty
-                                              ? null
-                                              : Text(
-                                                  'تاریخ: ${item.date}',
-                                                ),
+                                          Padding(
+                                        padding:
+                                            const EdgeInsets.only(
+                                          top: 6,
+                                        ),
+                                        child:
+                                            Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            if (item.date
+                                                .isNotEmpty)
+                                              Text(
+                                                'تاریخ: ${item.date}',
+                                              ),
+                                            if (item.type
+                                                .isNotEmpty)
+                                              Text(
+                                                'نوع: ${item.type}',
+                                              ),
+                                          ],
+                                        ),
+                                      ),
                                       trailing:
                                           const Icon(
                                         Icons
                                             .chevron_left,
                                       ),
-                                      onTap: () =>
-                                          openLaw(
+                                      onTap:
+                                          () =>
+                                              openLaw(
                                         item,
                                       ),
                                     ),
@@ -486,7 +694,8 @@ class LawPage extends StatefulWidget {
       _LawPageState();
 }
 
-class _LawPageState extends State<LawPage> {
+class _LawPageState
+    extends State<LawPage> {
   late final WebViewController controller;
 
   bool loading = true;
@@ -501,23 +710,21 @@ class _LawPageState extends State<LawPage> {
       )
       ..setNavigationDelegate(
         NavigationDelegate(
-          onPageStarted: (String url) {
+          onPageStarted:
+              (String url) {
             if (!mounted) return;
 
             setState(() {
               loading = true;
             });
           },
-          onPageFinished: (String url) {
+          onPageFinished:
+              (String url) {
             if (!mounted) return;
 
             setState(() {
               loading = false;
             });
-          },
-          onWebResourceError:
-              (WebResourceError error) {
-            // خطاهای منابع جانبی را نادیده می‌گیریم.
           },
         ),
       )
@@ -527,12 +734,17 @@ class _LawPageState extends State<LawPage> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(
+    BuildContext context,
+  ) {
     return Directionality(
-      textDirection: TextDirection.rtl,
+      textDirection:
+          TextDirection.rtl,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('متن قانون'),
+          title: const Text(
+            'متن قانون',
+          ),
         ),
         body: Stack(
           children: [
