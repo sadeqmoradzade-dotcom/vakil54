@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -49,9 +48,11 @@ class SearchPage extends StatefulWidget {
 
 class _SearchPageState extends State<SearchPage> {
   static const String baseUrl = 'https://rc.majlis.ir';
+  static const String searchUrl = '$baseUrl/fa/law/search';
   static const String ajaxUrl = '$baseUrl/fa/search/searchAjax';
 
-  final TextEditingController searchController = TextEditingController();
+  final TextEditingController searchController =
+      TextEditingController();
 
   late final WebViewController webController;
 
@@ -59,6 +60,7 @@ class _SearchPageState extends State<SearchPage> {
   bool webReady = false;
 
   String status = 'در حال اتصال به سامانه مجلس...';
+
   List<LawItem> items = <LawItem>[];
 
   @override
@@ -66,7 +68,9 @@ class _SearchPageState extends State<SearchPage> {
     super.initState();
 
     webController = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setJavaScriptMode(
+        JavaScriptMode.unrestricted,
+      )
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageFinished: (String url) {
@@ -74,6 +78,7 @@ class _SearchPageState extends State<SearchPage> {
 
             setState(() {
               webReady = true;
+
               if (!searching) {
                 status = 'عبارت موردنظر را وارد کنید';
               }
@@ -83,15 +88,13 @@ class _SearchPageState extends State<SearchPage> {
             if (!mounted) return;
 
             setState(() {
-              if (!webReady) {
-                status = 'اتصال به سامانه مجلس برقرار نشد';
-              }
+              status = 'ارتباط با سامانه مجلس برقرار نشد';
             });
           },
         ),
       )
       ..loadRequest(
-        Uri.parse('$baseUrl/fa/law/search'),
+        Uri.parse(searchUrl),
       );
   }
 
@@ -114,13 +117,6 @@ class _SearchPageState extends State<SearchPage> {
       return;
     }
 
-    if (!webReady) {
-      setState(() {
-        status = 'سامانه هنوز در حال آماده‌سازی است...';
-      });
-      return;
-    }
-
     setState(() {
       searching = true;
       status = 'در حال جستجو...';
@@ -128,105 +124,122 @@ class _SearchPageState extends State<SearchPage> {
     });
 
     try {
-      final String escapedTerm = jsonEncode(term);
-      final String escapedAjaxUrl = jsonEncode(ajaxUrl);
+      final String encoded =
+          Uri.encodeQueryComponent(term);
+
+      final String url =
+          '$ajaxUrl'
+          '?q=$encoded'
+          '&report=0'
+          '&news=0'
+          '&legal=0'
+          '&agenda=0'
+          '&law=1';
+
+      await webController.loadRequest(
+        Uri.parse(url),
+      );
+
+      await Future<void>.delayed(
+        const Duration(seconds: 3),
+      );
 
       final Object? result =
           await webController.runJavaScriptReturningResult(
         '''
-(async () => {
+(() => {
   try {
-    const url = $escapedAjaxUrl +
-      '?q=' + encodeURIComponent($escapedTerm) +
-      '&report=0' +
-      '&news=0' +
-      '&legal=0' +
-      '&agenda=0' +
-      '&law=1';
-
-    const response = await fetch(url, {
-      method: 'GET',
-      credentials: 'same-origin',
-      headers: {
-        'Accept': 'application/json, text/plain, */*'
-      }
-    });
-
-    const text = await response.text();
-
-    return JSON.stringify({
-      ok: response.ok,
-      status: response.status,
-      body: text
-    });
+    return document.body
+        ? document.body.innerText ||
+          document.body.textContent ||
+          ""
+        : "";
   } catch (e) {
-    return JSON.stringify({
-      ok: false,
-      error: String(e)
-    });
+    return "";
   }
 })()
 ''',
       );
 
-      String resultText = result?.toString() ?? '';
+      String body = result?.toString() ?? '';
 
-      if (resultText.startsWith('"') && resultText.endsWith('"')) {
+      if (body.startsWith('"') &&
+          body.endsWith('"')) {
         try {
-          resultText = jsonDecode(resultText) as String;
+          body = jsonDecode(body) as String;
         } catch (_) {}
       }
 
-      final dynamic wrapper = jsonDecode(resultText);
-
-      if (wrapper is! Map) {
-        throw Exception('پاسخ نامعتبر از سامانه');
-      }
-
-      if (wrapper['ok'] != true) {
-        final String error =
-            wrapper['error']?.toString() ??
-            'خطا در دریافت اطلاعات';
-
-        throw Exception(error);
-      }
-
-      final String body = wrapper['body']?.toString() ?? '';
+      body = body.trim();
 
       if (body.isEmpty) {
-        throw Exception('پاسخ خالی از سامانه دریافت شد');
+        throw Exception(
+          'پاسخ خالی از سامانه دریافت شد',
+        );
       }
 
-      final dynamic decoded = jsonDecode(body);
+      dynamic data;
 
-      final List<LawItem> parsed = <LawItem>[];
+      try {
+        data = jsonDecode(body);
+      } catch (_) {
+        final int start = body.indexOf('{');
+        final int end = body.lastIndexOf('}');
 
-      if (decoded is Map && decoded['result'] is List) {
-        final List<dynamic> results = decoded['result'] as List<dynamic>;
+        if (start >= 0 && end > start) {
+          data = jsonDecode(
+            body.substring(start, end + 1),
+          );
+        } else {
+          throw Exception(
+            'پاسخ سامانه قابل پردازش نیست',
+          );
+        }
+      }
 
-        for (final dynamic entry in results) {
-          if (entry is! Map) continue;
+      final List<LawItem> parsed =
+          <LawItem>[];
+
+      if (data is Map &&
+          data['result'] is List) {
+        final List<dynamic> results =
+            data['result'] as List<dynamic>;
+
+        for (final dynamic row in results) {
+          if (row is! Map) {
+            continue;
+          }
 
           final String title =
-              entry['title']?.toString().trim() ?? '';
+              row['title']
+                      ?.toString()
+                      .trim() ??
+                  '';
 
-          final String link =
-              entry['link']?.toString().trim() ?? '';
+          String link =
+              row['link']
+                      ?.toString()
+                      .trim() ??
+                  '';
 
           final String date =
-              entry['date_fa']?.toString().trim() ?? '';
+              row['date_fa']
+                      ?.toString()
+                      .trim() ??
+                  '';
 
           final String type =
-              entry['tbl_value']?.toString().trim() ?? '';
+              row['tbl_value']
+                      ?.toString()
+                      .trim() ??
+                  '';
 
           if (title.isEmpty || link.isEmpty) {
             continue;
           }
 
-          String fullLink = link;
-
-          if (fullLink.startsWith('/')) {
-            fullLink = '$baseUrl$fullLink';
+          if (link.startsWith('/')) {
+            link = '$baseUrl$link';
           }
 
           parsed.add(
@@ -234,7 +247,7 @@ class _SearchPageState extends State<SearchPage> {
               title: title,
               date: date,
               type: type,
-              link: fullLink,
+              link: link,
             ),
           );
         }
@@ -244,16 +257,22 @@ class _SearchPageState extends State<SearchPage> {
 
       setState(() {
         items = parsed;
-        status = parsed.isEmpty
-            ? 'برای «$term» نتیجه‌ای پیدا نشد'
-            : '${parsed.length} نتیجه پیدا شد';
+
+        if (parsed.isEmpty) {
+          status =
+              'برای «$term» نتیجه‌ای پیدا نشد';
+        } else {
+          status =
+              '${parsed.length} نتیجه پیدا شد';
+        }
       });
-    } catch (error) {
+    } catch (e) {
       if (!mounted) return;
 
       setState(() {
         items = <LawItem>[];
-        status = 'خطا در جستجو\n$error';
+        status =
+            'خطا در دریافت اطلاعات\n$e';
       });
     } finally {
       if (!mounted) return;
@@ -304,38 +323,55 @@ class _SearchPageState extends State<SearchPage> {
             ),
 
             Container(
-              color: Theme.of(context).scaffoldBackgroundColor,
+              color: Theme.of(context)
+                  .scaffoldBackgroundColor,
               child: Column(
                 children: [
                   Padding(
-                    padding: const EdgeInsets.all(16),
+                    padding:
+                        const EdgeInsets.all(16),
                     child: TextField(
-                      controller: searchController,
-                      textInputAction: TextInputAction.search,
+                      controller:
+                          searchController,
+                      textInputAction:
+                          TextInputAction.search,
                       onSubmitted: (_) => search(),
-                      decoration: InputDecoration(
-                        hintText: 'مثلاً مهندس ناظر',
-                        prefixIcon: const Icon(Icons.search),
-                        suffixIcon: IconButton(
-                          icon: const Icon(Icons.search),
-                          onPressed: searching || !webReady
-                              ? null
-                              : search,
+                      decoration:
+                          InputDecoration(
+                        hintText:
+                            'مثلاً مهندس ناظر',
+                        prefixIcon:
+                            const Icon(
+                          Icons.search,
                         ),
-                        border: const OutlineInputBorder(),
+                        suffixIcon:
+                            IconButton(
+                          icon: const Icon(
+                            Icons.search,
+                          ),
+                          onPressed:
+                              searching
+                                  ? null
+                                  : search,
+                        ),
+                        border:
+                            const OutlineInputBorder(),
                       ),
                     ),
                   ),
 
                   Padding(
-                    padding: const EdgeInsets.symmetric(
+                    padding:
+                        const EdgeInsets.symmetric(
                       horizontal: 16,
                     ),
                     child: Align(
-                      alignment: Alignment.centerRight,
+                      alignment:
+                          Alignment.centerRight,
                       child: Text(
                         status,
-                        textAlign: TextAlign.right,
+                        textAlign:
+                            TextAlign.right,
                       ),
                     ),
                   ),
@@ -345,64 +381,101 @@ class _SearchPageState extends State<SearchPage> {
                   Expanded(
                     child: searching
                         ? const Center(
-                            child: CircularProgressIndicator(),
+                            child:
+                                CircularProgressIndicator(),
                           )
                         : items.isEmpty
                             ? Center(
                                 child: Padding(
-                                  padding: const EdgeInsets.all(24),
+                                  padding:
+                                      const EdgeInsets.all(
+                                    24,
+                                  ),
                                   child: Text(
                                     status,
-                                    textAlign: TextAlign.center,
+                                    textAlign:
+                                        TextAlign.center,
                                   ),
                                 ),
                               )
                             : ListView.separated(
-                                padding: const EdgeInsets.all(12),
-                                itemCount: items.length,
-                                separatorBuilder: (
+                                padding:
+                                    const EdgeInsets.all(
+                                  12,
+                                ),
+                                itemCount:
+                                    items.length,
+                                separatorBuilder:
+                                    (
                                   context,
                                   index,
                                 ) =>
-                                    const SizedBox(height: 8),
-                                itemBuilder: (context, index) {
-                                  final LawItem item = items[index];
+                                        const SizedBox(
+                                  height: 8,
+                                ),
+                                itemBuilder:
+                                    (
+                                  context,
+                                  index,
+                                ) {
+                                  final LawItem item =
+                                      items[index];
 
                                   return Card(
-                                    child: ListTile(
+                                    child:
+                                        ListTile(
                                       contentPadding:
-                                          const EdgeInsets.symmetric(
+                                          const EdgeInsets
+                                              .symmetric(
                                         horizontal: 16,
                                         vertical: 8,
                                       ),
-                                      title: Text(
+                                      title:
+                                          Text(
                                         item.title,
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.bold,
+                                        style:
+                                            const TextStyle(
+                                          fontWeight:
+                                              FontWeight.bold,
                                         ),
                                       ),
-                                      subtitle: Padding(
+                                      subtitle:
+                                          Padding(
                                         padding:
-                                            const EdgeInsets.only(top: 8),
-                                        child: Column(
+                                            const EdgeInsets
+                                                .only(
+                                          top: 8,
+                                        ),
+                                        child:
+                                            Column(
                                           crossAxisAlignment:
-                                              CrossAxisAlignment.start,
+                                              CrossAxisAlignment
+                                                  .start,
                                           children: [
-                                            if (item.date.isNotEmpty)
+                                            if (item
+                                                .date
+                                                .isNotEmpty)
                                               Text(
                                                 'تاریخ: ${item.date}',
                                               ),
-                                            if (item.type.isNotEmpty)
+                                            if (item
+                                                .type
+                                                .isNotEmpty)
                                               Text(
                                                 'نوع: ${item.type}',
                                               ),
                                           ],
                                         ),
                                       ),
-                                      trailing: const Icon(
-                                        Icons.chevron_left,
+                                      trailing:
+                                          const Icon(
+                                        Icons
+                                            .chevron_left,
                                       ),
-                                      onTap: () => openLaw(item),
+                                      onTap: () =>
+                                          openLaw(
+                                        item,
+                                      ),
                                     ),
                                   );
                                 },
@@ -429,11 +502,13 @@ class LawPage extends StatefulWidget {
   });
 
   @override
-  State<LawPage> createState() => _LawPageState();
+  State<LawPage> createState() =>
+      _LawPageState();
 }
 
 class _LawPageState extends State<LawPage> {
   late final WebViewController controller;
+
   bool loading = true;
 
   @override
@@ -441,7 +516,9 @@ class _LawPageState extends State<LawPage> {
     super.initState();
 
     controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setJavaScriptMode(
+        JavaScriptMode.unrestricted,
+      )
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageStarted: (String url) {
@@ -458,9 +535,19 @@ class _LawPageState extends State<LawPage> {
               loading = false;
             });
           },
+          onWebResourceError:
+              (WebResourceError error) {
+            if (!mounted) return;
+
+            setState(() {
+              loading = false;
+            });
+          },
         ),
       )
-      ..loadRequest(Uri.parse(widget.url));
+      ..loadRequest(
+        Uri.parse(widget.url),
+      );
   }
 
   @override
@@ -469,11 +556,7 @@ class _LawPageState extends State<LawPage> {
       textDirection: TextDirection.rtl,
       child: Scaffold(
         appBar: AppBar(
-          title: Text(
-            widget.title,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
+          title: const Text('متن قانون'),
         ),
         body: Stack(
           children: [
@@ -482,7 +565,8 @@ class _LawPageState extends State<LawPage> {
             ),
             if (loading)
               const Center(
-                child: CircularProgressIndicator(),
+                child:
+                    CircularProgressIndicator(),
               ),
           ],
         ),
