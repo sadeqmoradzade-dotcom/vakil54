@@ -48,8 +48,12 @@ class SearchPage extends StatefulWidget {
 
 class _SearchPageState extends State<SearchPage> {
   static const String baseUrl = 'https://rc.majlis.ir';
-  static const String searchPageUrl =
+
+  static const String searchPage =
       '$baseUrl/fa/law/search';
+
+  static const String ajaxPage =
+      '$baseUrl/fa/search/searchAjax';
 
   final TextEditingController searchController =
       TextEditingController();
@@ -57,9 +61,9 @@ class _SearchPageState extends State<SearchPage> {
   late final WebViewController webController;
 
   bool searching = false;
-  bool webReady = false;
 
-  String status = 'در حال اتصال به سامانه مجلس...';
+  String status =
+      'در حال اتصال به سامانه مجلس...';
 
   List<LawItem> items = <LawItem>[];
 
@@ -76,216 +80,214 @@ class _SearchPageState extends State<SearchPage> {
           onPageFinished: (String url) {
             if (!mounted) return;
 
-            setState(() {
-              webReady = true;
-
-              if (!searching) {
-                status = 'عبارت موردنظر را وارد کنید';
-              }
-            });
+            if (!searching) {
+              setState(() {
+                status =
+                    'عبارت موردنظر را وارد کنید';
+              });
+            }
           },
-          onWebResourceError: (WebResourceError error) {
+          onWebResourceError:
+              (WebResourceError error) {
             if (!mounted) return;
 
             setState(() {
               status =
-                  'ارتباط با سامانه مجلس برقرار نشد';
+                  'اتصال به سامانه مجلس برقرار نشد';
             });
           },
         ),
       )
       ..loadRequest(
-        Uri.parse(searchPageUrl),
+        Uri.parse(searchPage),
       );
   }
 
-  Future<bool> _callSiteSearch(String term) async {
-    final String safeTerm = jsonEncode(term);
+  Future<Map<String, dynamic>> _ajaxSearch(
+    String term,
+  ) async {
+    final String safeTerm =
+        jsonEncode(term);
 
-    try {
-      final Object? result =
-          await webController.runJavaScriptReturningResult(
-        '''
-(() => {
-  try {
-    if (typeof serachInElastic !== 'function') {
-      return JSON.stringify({
-        "ok": false,
-        "error": "تابع جستجوی سایت هنوز بارگذاری نشده است"
-      });
-    }
-
-    serachInElastic(
-      $safeTerm,
-      0,
-      0,
-      1,
-      0,
-      0
-    );
-
-    return JSON.stringify({
-      "ok": true
-    });
-  } catch (e) {
-    return JSON.stringify({
-      "ok": false,
-      "error": String(e)
-    });
-  }
-})()
-''',
-      );
-
-      String text = result?.toString() ?? '';
-
-      if (text.startsWith('"') &&
-          text.endsWith('"')) {
-        try {
-          text = jsonDecode(text) as String;
-        } catch (_) {}
-      }
-
-      final dynamic data = jsonDecode(text);
-
-      if (data is Map && data['ok'] == true) {
-        return true;
-      }
-
-      return false;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  Future<List<LawItem>> _readResults() async {
     final Object? result =
-        await webController.runJavaScriptReturningResult(
+        await webController
+            .runJavaScriptReturningResult(
       '''
 (() => {
-  try {
-    const rows = Array.from(
-      document.querySelectorAll('#result tr')
-    );
+  return new Promise((resolve) => {
+    try {
+      const xhr = new XMLHttpRequest();
 
-    return JSON.stringify(
-      rows.map((row) => {
-        const link =
-          row.querySelector('a[href]');
+      const url =
+        '$ajaxPage'
+        + '?q=' + encodeURIComponent($safeTerm)
+        + '&report=0'
+        + '&news=0'
+        + '&legal=0'
+        + '&agenda=0'
+        + '&law=1';
 
-        const cells =
-          Array.from(row.querySelectorAll('td'))
-            .map(
-              (cell) =>
-                (cell.innerText ||
-                 cell.textContent ||
-                 '')
-                  .trim()
-            );
+      xhr.open('GET', url, true);
 
-        return {
-          title:
-            link
-              ? (
-                  link.innerText ||
-                  link.textContent ||
-                  ''
-                ).trim()
-              : '',
+      xhr.setRequestHeader(
+        'X-Requested-With',
+        'XMLHttpRequest'
+      );
 
-          href:
-            link
-              ? (link.href || '')
-              : '',
+      xhr.setRequestHeader(
+        'Accept',
+        'application/json, text/plain, */*'
+      );
 
-          date:
-            cells.length > 2
-              ? cells[2]
-              : '',
+      xhr.onreadystatechange = function() {
+        if (xhr.readyState === 4) {
+          resolve(
+            JSON.stringify({
+              "status": xhr.status,
+              "text": xhr.responseText || ""
+            })
+          );
+        }
+      };
 
-          type:
-            cells.length > 3
-              ? cells[3]
-              : ''
-        };
-      })
-    );
-  } catch (e) {
-    return '[]';
-  }
+      xhr.onerror = function() {
+        resolve(
+          JSON.stringify({
+            "status": 0,
+            "text": "",
+            "error": "XHR_ERROR"
+          })
+        );
+      };
+
+      xhr.ontimeout = function() {
+        resolve(
+          JSON.stringify({
+            "status": 0,
+            "text": "",
+            "error": "TIMEOUT"
+          })
+        );
+      };
+
+      xhr.timeout = 20000;
+
+      xhr.send();
+    } catch (e) {
+      resolve(
+        JSON.stringify({
+          "status": 0,
+          "text": "",
+          "error": String(e)
+        })
+      );
+    }
+  });
 })()
 ''',
     );
 
-    String text = result?.toString() ?? '[]';
+    String resultText =
+        result?.toString() ?? '';
 
-    if (text.startsWith('"') &&
-        text.endsWith('"')) {
+    if (resultText.startsWith('"') &&
+        resultText.endsWith('"')) {
       try {
-        text = jsonDecode(text) as String;
+        resultText =
+            jsonDecode(resultText) as String;
       } catch (_) {}
     }
 
-    try {
-      final dynamic decoded =
-          jsonDecode(text);
+    final dynamic decoded =
+        jsonDecode(resultText);
 
-      if (decoded is! List) {
-        return <LawItem>[];
-      }
-
-      final List<LawItem> parsed =
-          <LawItem>[];
-
-      for (final dynamic item in decoded) {
-        if (item is! Map) continue;
-
-        final String title =
-            item['title']
-                    ?.toString()
-                    .trim() ??
-                '';
-
-        String href =
-            item['href']
-                    ?.toString()
-                    .trim() ??
-                '';
-
-        final String date =
-            item['date']
-                    ?.toString()
-                    .trim() ??
-                '';
-
-        final String type =
-            item['type']
-                    ?.toString()
-                    .trim() ??
-                '';
-
-        if (title.isEmpty || href.isEmpty) {
-          continue;
-        }
-
-        if (href.startsWith('/')) {
-          href = '$baseUrl$href';
-        }
-
-        parsed.add(
-          LawItem(
-            title: title,
-            date: date,
-            type: type,
-            link: href,
-          ),
-        );
-      }
-
-      return parsed;
-    } catch (_) {
-      return <LawItem>[];
+    if (decoded is Map) {
+      return Map<String, dynamic>.from(
+        decoded,
+      );
     }
+
+    return <String, dynamic>{};
+  }
+
+  List<LawItem> _parseResults(
+    String response,
+  ) {
+    final List<LawItem> parsed =
+        <LawItem>[];
+
+    if (response.trim().isEmpty) {
+      return parsed;
+    }
+
+    dynamic data;
+
+    try {
+      data = jsonDecode(response);
+    } catch (_) {
+      return parsed;
+    }
+
+    if (data is! Map) {
+      return parsed;
+    }
+
+    final dynamic result =
+        data['result'];
+
+    if (result is! List) {
+      return parsed;
+    }
+
+    for (final dynamic row in result) {
+      if (row is! Map) {
+        continue;
+      }
+
+      final String title =
+          row['title']
+                  ?.toString()
+                  .trim() ??
+              '';
+
+      String link =
+          row['link']
+                  ?.toString()
+                  .trim() ??
+              '';
+
+      final String date =
+          row['date_fa']
+                  ?.toString()
+                  .trim() ??
+              '';
+
+      final String type =
+          row['tbl_value']
+                  ?.toString()
+                  .trim() ??
+              '';
+
+      if (title.isEmpty ||
+          link.isEmpty) {
+        continue;
+      }
+
+      if (link.startsWith('/')) {
+        link = '$baseUrl$link';
+      }
+
+      parsed.add(
+        LawItem(
+          title: title,
+          date: date,
+          type: type,
+          link: link,
+        ),
+      );
+    }
+
+    return parsed;
   }
 
   Future<void> search() async {
@@ -317,76 +319,84 @@ class _SearchPageState extends State<SearchPage> {
     });
 
     try {
-      if (!webReady) {
-        await webController.loadRequest(
-          Uri.parse(searchPageUrl),
-        );
+      /*
+       * اول مطمئن می‌شویم صفحه اصلی سایت
+       * داخل WebView باز شده باشد.
+       */
+      await webController.loadRequest(
+        Uri.parse(searchPage),
+      );
 
-        await Future<void>.delayed(
-          const Duration(seconds: 3),
-        );
-      }
+      await Future<void>.delayed(
+        const Duration(seconds: 3),
+      );
 
-      bool started = false;
+      final Map<String, dynamic> ajax =
+          await _ajaxSearch(term);
 
-      // چند بار تلاش می‌کنیم تا اسکریپت سایت آماده شده باشد.
-      for (int attempt = 0; attempt < 5; attempt++) {
-        started =
-            await _callSiteSearch(term);
+      final int httpStatus =
+          int.tryParse(
+                ajax['status']
+                        ?.toString() ??
+                    '0',
+              ) ??
+              0;
 
-        if (started) {
-          break;
-        }
+      final String response =
+          ajax['text']
+                  ?.toString() ??
+              '';
 
-        await Future<void>.delayed(
-          const Duration(seconds: 1),
-        );
-      }
+      final String jsError =
+          ajax['error']
+                  ?.toString() ??
+              '';
 
-      if (!started) {
+      if (httpStatus == 0) {
         throw Exception(
-          'تابع جستجوی سایت بارگذاری نشد',
+          jsError.isEmpty
+              ? 'ارتباط XHR با سامانه برقرار نشد'
+              : jsError,
         );
       }
 
-      List<LawItem> results =
-          <LawItem>[];
-
-      // منتظر می‌مانیم AJAX سایت نتیجه‌ها را
-      // داخل #result قرار دهد.
-      for (int i = 0; i < 15; i++) {
-        await Future<void>.delayed(
-          const Duration(seconds: 1),
+      if (httpStatus < 200 ||
+          httpStatus >= 300) {
+        throw Exception(
+          'سرور سامانه کد $httpStatus برگرداند',
         );
-
-        results = await _readResults();
-
-        if (results.isNotEmpty) {
-          break;
-        }
       }
+
+      if (response.isEmpty) {
+        throw Exception(
+          'پاسخ خالی از سامانه دریافت شد',
+        );
+      }
+
+      final List<LawItem> parsed =
+          _parseResults(response);
 
       if (!mounted) return;
 
       setState(() {
-        items = results;
+        items = parsed;
 
-        if (results.isEmpty) {
+        if (parsed.isEmpty) {
           status =
               'برای «$term» نتیجه‌ای پیدا نشد';
         } else {
           status =
-              '${results.length} نتیجه پیدا شد';
+              '${parsed.length} نتیجه پیدا شد';
         }
       });
-    } catch (error) {
+    } catch (e) {
       if (!mounted) return;
 
       setState(() {
         items = <LawItem>[];
 
         status =
-            'خطا در جستجو\n$error';
+            'خطا در دریافت اطلاعات\n$e';
       });
     } finally {
       if (!mounted) return;
@@ -437,9 +447,8 @@ class _SearchPageState extends State<SearchPage> {
             ),
 
             Container(
-              color:
-                  Theme.of(context)
-                      .scaffoldBackgroundColor,
+              color: Theme.of(context)
+                  .scaffoldBackgroundColor,
               child: Column(
                 children: [
                   Padding(
@@ -462,7 +471,8 @@ class _SearchPageState extends State<SearchPage> {
                         ),
                         suffixIcon:
                             IconButton(
-                          icon: const Icon(
+                          icon:
+                              const Icon(
                             Icons.search,
                           ),
                           onPressed:
@@ -492,7 +502,9 @@ class _SearchPageState extends State<SearchPage> {
                     ),
                   ),
 
-                  const SizedBox(height: 10),
+                  const SizedBox(
+                    height: 10,
+                  ),
 
                   Expanded(
                     child: searching
@@ -522,12 +534,18 @@ class _SearchPageState extends State<SearchPage> {
                                 itemCount:
                                     items.length,
                                 separatorBuilder:
-                                    (context, index) =>
+                                    (
+                                  context,
+                                  index,
+                                ) =>
                                         const SizedBox(
                                   height: 8,
                                 ),
                                 itemBuilder:
-                                    (context, index) {
+                                    (
+                                  context,
+                                  index,
+                                ) {
                                   final LawItem item =
                                       items[index];
 
@@ -535,12 +553,6 @@ class _SearchPageState extends State<SearchPage> {
                                     elevation: 2,
                                     child:
                                         ListTile(
-                                      contentPadding:
-                                          const EdgeInsets
-                                              .symmetric(
-                                        horizontal: 16,
-                                        vertical: 10,
-                                      ),
                                       title:
                                           Text(
                                         item.title,
@@ -668,9 +680,7 @@ class _LawPageState extends State<LawPage> {
       textDirection: TextDirection.rtl,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text(
-            'متن قانون',
-          ),
+          title: const Text('متن قانون'),
         ),
         body: Stack(
           children: [
