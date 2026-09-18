@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -39,6 +40,18 @@ class LawItem {
   });
 }
 
+class _SearchResponse {
+  final int statusCode;
+  final String body;
+  final String? error;
+
+  const _SearchResponse({
+    required this.statusCode,
+    required this.body,
+    this.error,
+  });
+}
+
 class SearchPage extends StatefulWidget {
   const SearchPage({super.key});
 
@@ -48,7 +61,8 @@ class SearchPage extends StatefulWidget {
 
 class _SearchPageState extends State<SearchPage> {
   static const String baseUrl = 'https://rc.majlis.ir';
-  static const String ajaxUrl =
+  static const String searchPageUrl = '$baseUrl/fa/law/search';
+  static const String fallbackAjaxUrl =
       '$baseUrl/fa/search/searchAjax';
 
   final TextEditingController searchController =
@@ -56,10 +70,13 @@ class _SearchPageState extends State<SearchPage> {
 
   late final WebViewController webController;
 
+  Completer<_SearchResponse>? _pendingSearch;
+  int _requestId = 0;
+
   bool searching = false;
+  bool pageReady = false;
 
-  String status = 'عبارت موردنظر را وارد کنید';
-
+  String status = 'در حال اتصال به سامانه مجلس...';
   List<LawItem> items = <LawItem>[];
 
   @override
@@ -70,204 +87,433 @@ class _SearchPageState extends State<SearchPage> {
       ..setJavaScriptMode(
         JavaScriptMode.unrestricted,
       )
+      ..setUserAgent(
+        'Mozilla/5.0 (Linux; Android 13; Mobile) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) '
+        'Chrome/124.0.0.0 Mobile Safari/537.36',
+      )
+      ..addJavaScriptChannel(
+        'VakilSearch',
+        onMessageReceived: _onSearchMessage,
+      )
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageFinished: (String url) {
             if (!mounted) return;
 
-            if (!searching) {
-              setState(() {
-                status =
-                    'عبارت موردنظر را وارد کنید';
-              });
-            }
+            setState(() {
+              pageReady = true;
+
+              if (!searching) {
+                status = 'عبارت موردنظر را وارد کنید';
+              }
+            });
+          },
+          onWebResourceError: (WebResourceError error) {
+            // خطاهای منابع جانبی سایت باعث خطای کلی نمی‌شوند.
           },
         ),
       )
       ..loadRequest(
-        Uri.parse(
-          '$baseUrl/fa/law/search',
-        ),
+        Uri.parse(searchPageUrl),
       );
   }
 
-  Future<List<LawItem>> getResults(
+  void _onSearchMessage(
+    JavaScriptMessage message,
+  ) {
+    try {
+      final dynamic decoded =
+          jsonDecode(message.message);
+
+      if (decoded is! Map) return;
+
+      final int id =
+          int.tryParse(
+                decoded['id']?.toString() ?? '',
+              ) ??
+              -1;
+
+      if (id != _requestId) return;
+
+      final int statusCode =
+          int.tryParse(
+                decoded['status']?.toString() ?? '0',
+              ) ??
+              0;
+
+      final String body =
+          decoded['body']?.toString() ?? '';
+
+      final String? error =
+          decoded['error']?.toString();
+
+      final Completer<_SearchResponse>? completer =
+          _pendingSearch;
+
+      if (completer == null ||
+          completer.isCompleted) {
+        return;
+      }
+
+      completer.complete(
+        _SearchResponse(
+          statusCode: statusCode,
+          body: body,
+          error: error,
+        ),
+      );
+    } catch (_) {
+      // پاسخ خراب یا قدیمی نادیده گرفته می‌شود.
+    }
+  }
+
+  Future<bool> _waitForSearchPage({
+    int timeoutSeconds = 20,
+  }) async {
+    for (int i = 0;
+        i < timeoutSeconds;
+        i++) {
+      try {
+        final Object? result =
+            await webController
+                .runJavaScriptReturningResult(
+          '''
+(() => JSON.stringify({
+  ready: document.readyState,
+  url: location.href,
+  ajax: (() => {
+    const el =
+      document.getElementById('searchAjax');
+
+    return el
+      ? (el.value || '')
+      : '';
+  })(),
+  title: document.title || ''
+}))()
+''',
+        );
+
+        String text =
+            result?.toString() ?? '{}';
+
+        if (text.startsWith('"') &&
+            text.endsWith('"')) {
+          try {
+            text = jsonDecode(text) as String;
+          } catch (_) {}
+        }
+
+        final dynamic data =
+            jsonDecode(text);
+
+        if (data is Map) {
+          final String ajax =
+              data['ajax']?.toString() ?? '';
+
+          final String url =
+              data['url']?.toString() ?? '';
+
+          final String ready =
+              data['ready']?.toString() ?? '';
+
+          if (ready == 'complete' &&
+              ajax.isNotEmpty &&
+              url.contains(
+                '/fa/law/search',
+              )) {
+            return true;
+          }
+        }
+      } catch (_) {}
+
+      await Future<void>.delayed(
+        const Duration(seconds: 1),
+      );
+    }
+
+    return false;
+  }
+
+  Future<_SearchResponse>
+      _requestSearchInWebView(
     String term,
   ) async {
-    final String encoded =
-        Uri.encodeQueryComponent(term);
+    final int id = ++_requestId;
 
-    final String url =
-        '$ajaxUrl'
-        '?q=$encoded'
-        '&report=0'
-        '&news=0'
-        '&legal=0'
-        '&agenda=0'
-        '&law=1';
+    final Completer<_SearchResponse>
+        completer =
+        Completer<_SearchResponse>();
 
-    await webController.loadRequest(
-      Uri.parse(url),
-    );
+    _pendingSearch = completer;
 
-    await Future<void>.delayed(
-      const Duration(seconds: 3),
-    );
+    final String termJson =
+        jsonEncode(term);
 
-    final Object? jsResult =
-        await webController
-            .runJavaScriptReturningResult(
+    final String idJson =
+        jsonEncode(id);
+
+    final String fallbackJson =
+        jsonEncode(fallbackAjaxUrl);
+
+    await webController.runJavaScript(
       '''
 (() => {
   try {
-    const body = document.body;
+    const searchTerm =
+      $termJson;
 
-    if (!body) {
-      return "";
+    const requestId =
+      $idJson;
+
+    const fallback =
+      $fallbackJson;
+
+    const input =
+      document.getElementById(
+        'searchAjax'
+      );
+
+    let endpoint =
+      input
+        ? (input.value || '')
+        : '';
+
+    if (!endpoint) {
+      endpoint = fallback;
     }
 
-    return body.innerText ||
-           body.textContent ||
-           "";
+    try {
+      endpoint =
+        new URL(
+          endpoint,
+          location.origin
+        ).href;
+    } catch (_) {}
+
+    const xhr =
+      new XMLHttpRequest();
+
+    xhr.open(
+      'GET',
+      endpoint +
+        '?q=' +
+        encodeURIComponent(
+          searchTerm
+        ) +
+        '&report=0' +
+        '&news=0' +
+        '&legal=0' +
+        '&agenda=0' +
+        '&law=1',
+      true
+    );
+
+    xhr.withCredentials = true;
+
+    xhr.setRequestHeader(
+      'Accept',
+      'application/json, text/plain, */*'
+    );
+
+    xhr.setRequestHeader(
+      'X-Requested-With',
+      'XMLHttpRequest'
+    );
+
+    const send =
+      (payload) => {
+        try {
+          window.VakilSearch.postMessage(
+            JSON.stringify(
+              payload
+            )
+          );
+        } catch (_) {}
+      };
+
+    xhr.onreadystatechange =
+      function() {
+        if (
+          xhr.readyState === 4
+        ) {
+          send({
+            id: requestId,
+            status:
+              xhr.status || 0,
+            body:
+              xhr.responseText ||
+              '',
+            error:
+              xhr.status === 0
+                ? 'XHR status 0'
+                : null
+          });
+        }
+      };
+
+    xhr.onerror =
+      function() {
+        send({
+          id: requestId,
+          status: 0,
+          body: '',
+          error:
+            'XHR_NETWORK_ERROR'
+        });
+      };
+
+    xhr.ontimeout =
+      function() {
+        send({
+          id: requestId,
+          status: 0,
+          body: '',
+          error:
+            'XHR_TIMEOUT'
+        });
+      };
+
+    xhr.timeout = 20000;
+
+    xhr.send();
   } catch (e) {
-    return "";
+    window.VakilSearch.postMessage(
+      JSON.stringify({
+        id: $idJson,
+        status: 0,
+        body: '',
+        error: String(e)
+      })
+    );
   }
-})()
+})();
 ''',
     );
 
-    String text =
-        jsResult?.toString() ?? '';
-
-    if (text.startsWith('"') &&
-        text.endsWith('"')) {
-      try {
-        text = jsonDecode(text) as String;
-      } catch (_) {}
-    }
-
-    text = text.trim();
-
-    if (text.isEmpty) {
-      throw Exception(
-        'پاسخ خالی از سامانه',
-      );
-    }
-
-    /*
-     * حالت اول:
-     * پاسخ مستقیماً JSON است.
-     */
     try {
-      final dynamic data =
-          jsonDecode(text);
-
-      return _parseJson(data);
-    } catch (_) {
-      // ادامه می‌دهیم؛ ممکن است متن JSON
-      // داخل <pre> یا متن صفحه باشد.
-    }
-
-    /*
-     * حالت دوم:
-     * پیدا کردن اولین بلوک JSON
-     * داخل پاسخ.
-     */
-    final int jsonStart =
-        text.indexOf('{');
-
-    final int jsonEnd =
-        text.lastIndexOf('}');
-
-    if (jsonStart >= 0 &&
-        jsonEnd > jsonStart) {
-      final String jsonPart =
-          text.substring(
-        jsonStart,
-        jsonEnd + 1,
+      return await completer.future.timeout(
+        const Duration(seconds: 25),
       );
+    } on TimeoutException {
+      if (!completer.isCompleted) {
+        completer.complete(
+          const _SearchResponse(
+            statusCode: 0,
+            body: '',
+            error:
+                'WEBVIEW_SEARCH_TIMEOUT',
+          ),
+        );
+      }
 
-      try {
-        final dynamic data =
-            jsonDecode(jsonPart);
-
-        return _parseJson(data);
-      } catch (_) {}
+      return completer.future;
+    } finally {
+      if (identical(
+        _pendingSearch,
+        completer,
+      )) {
+        _pendingSearch = null;
+      }
     }
-
-    /*
-     * حالت سوم:
-     * پاسخ ممکن است به شکل جدول
-     * متنی/Markdown برگشته باشد.
-     */
-    return _parseTextResponse(text);
   }
 
-  List<LawItem> _parseJson(
-    dynamic data,
+  List<LawItem> _parseResponse(
+    String body,
   ) {
-    final List<LawItem> output =
+    String text = body.trim();
+
+    if (text.isEmpty) {
+      return <LawItem>[];
+    }
+
+    dynamic decoded;
+
+    try {
+      decoded = jsonDecode(text);
+    } catch (_) {
+      final int start =
+          text.indexOf('{');
+
+      final int end =
+          text.lastIndexOf('}');
+
+      if (start >= 0 &&
+          end > start) {
+        try {
+          decoded = jsonDecode(
+            text.substring(
+              start,
+              end + 1,
+            ),
+          );
+        } catch (_) {
+          return <LawItem>[];
+        }
+      } else {
+        return <LawItem>[];
+      }
+    }
+
+    if (decoded is! Map ||
+        decoded['result'] is! List) {
+      return <LawItem>[];
+    }
+
+    final List<LawItem> parsed =
         <LawItem>[];
 
-    if (data is! Map) {
-      return output;
-    }
+    final Set<String> seenLinks =
+        <String>{};
 
-    final dynamic result =
-        data['result'];
-
-    if (result is! List) {
-      return output;
-    }
-
-    for (final dynamic row in result) {
+    for (final dynamic row
+        in decoded['result'] as List) {
       if (row is! Map) {
         continue;
       }
 
-      final String title =
-          row['pure_title']?.toString().trim() ??
-              row['title']?.toString().trim() ??
+      String title =
+          row['pure_title']
+                  ?.toString()
+                  .trim() ??
+              row['title']
+                  ?.toString()
+                  .trim() ??
               '';
 
       String link =
-          row['link']?.toString().trim() ?? '';
+          row['link']
+                  ?.toString()
+                  .trim() ??
+              '';
 
       final String date =
-          row['date_fa']?.toString().trim() ?? '';
+          row['date_fa']
+                  ?.toString()
+                  .trim() ??
+              '';
 
       final String type =
-          row['tbl_value']?.toString().trim() ?? '';
+          row['tbl_value']
+                  ?.toString()
+                  .trim() ??
+              '';
+
+      title = _cleanHtml(title);
+      link = _normalizeLink(link);
 
       if (title.isEmpty ||
-          link.isEmpty) {
+          link.isEmpty ||
+          seenLinks.contains(link)) {
         continue;
       }
 
-      /*
-       * اگر لینک به شکل Markdown آمده باشد:
-       * [https://...](https://...)
-       */
-      final RegExp markdownLink =
-          RegExp(
-        r'\]\((https?://[^)\s]+)',
-      );
+      seenLinks.add(link);
 
-      final Match? match =
-          markdownLink.firstMatch(link);
-
-      if (match != null) {
-        link =
-            match.group(1) ?? link;
-      }
-
-      if (link.startsWith('/')) {
-        link = '$baseUrl$link';
-      }
-
-      output.add(
+      parsed.add(
         LawItem(
-          title: _cleanHtml(title),
+          title: title,
           date: date,
           type: type,
           link: link,
@@ -275,108 +521,36 @@ class _SearchPageState extends State<SearchPage> {
       );
     }
 
-    return output;
+    return parsed;
   }
 
-  List<LawItem> _parseTextResponse(
-    String text,
+  String _normalizeLink(
+    String value,
   ) {
-    final List<LawItem> output =
-        <LawItem>[];
+    String link = value.trim();
 
-    /*
-     * پاسخ تست واقعی سایت شامل خطوطی
-     * مثل:
-     *
-     * title | ...
-     * date_fa | ...
-     * link | ...
-     *
-     * است. این parser تلاش می‌کند
-     * از همان متن اطلاعات را بردارد.
-     */
+    final Match? markdown =
+        RegExp(
+      r'\]\((https?://[^)\s]+)',
+    ).firstMatch(link);
 
-    final RegExp blockRegex = RegExp(
-      r'oid\s*\|.*?\n'
-      r'title\s*\|\s*(.*?)\n'
-      r'date\s*\|\s*(.*?)\n'
-      r'tbl_value\s*\|\s*(.*?)\n'
-      r'tbl_index\s*\|\s*(.*?)\n'
-      r'pure_title\s*\|\s*(.*?)\n'
-      r'date_fa\s*\|\s*"?(.*?)"?\n'
-      r'link\s*\|\s*.*?https?://rc\.majlis\.ir/fa/[^)\s]+',
-      multiLine: true,
-      dotAll: true,
-    );
-
-    for (final Match match
-        in blockRegex.allMatches(text)) {
-      String title =
-          match.group(6)?.trim() ?? '';
-
-      final String date =
-          match.group(7)?.trim() ?? '';
-
-      String fullBlock =
-          match.group(0) ?? '';
-
-      final RegExp linkRegex = RegExp(
-        r'https?://rc\.majlis\.ir/fa/(?:law|news|legal|agenda)/show/\d+',
-      );
-
-      final Match? linkMatch =
-          linkRegex.firstMatch(fullBlock);
-
-      String link =
-          linkMatch?.group(0) ?? '';
-
-      title = _cleanHtml(
-        _stripQuotes(title),
-      );
-
-      if (title.isEmpty ||
-          link.isEmpty) {
-        continue;
-      }
-
-      output.add(
-        LawItem(
-          title: title,
-          date: date.replaceAll('"', ''),
-          type: 'قانون',
-          link: link,
-        ),
-      );
+    if (markdown != null) {
+      link =
+          markdown.group(1) ??
+              link;
     }
 
-    return output;
+    if (link.startsWith('/')) {
+      link =
+          '$baseUrl$link';
+    }
+
+    return link;
   }
 
-  String _stripQuotes(String value) {
-    String result = value.trim();
-
-    if (result.startsWith("'") &&
-        result.endsWith("'")) {
-      result =
-          result.substring(
-        1,
-        result.length - 1,
-      );
-    }
-
-    if (result.startsWith('"') &&
-        result.endsWith('"')) {
-      result =
-          result.substring(
-        1,
-        result.length - 1,
-      );
-    }
-
-    return result;
-  }
-
-  String _cleanHtml(String value) {
+  String _cleanHtml(
+    String value,
+  ) {
     return value
         .replaceAll(
           RegExp(r'<[^>]*>'),
@@ -389,6 +563,10 @@ class _SearchPageState extends State<SearchPage> {
         .replaceAll(
           '&quot;',
           '"',
+        )
+        .replaceAll(
+          '&#39;',
+          "'",
         )
         .replaceAll(
           '&amp;',
@@ -407,53 +585,127 @@ class _SearchPageState extends State<SearchPage> {
 
     if (term.isEmpty) {
       setState(() {
-        items = <LawItem>[];
         status =
             'عبارت جستجو را وارد کنید';
+
+        items = <LawItem>[];
       });
+
       return;
     }
 
     if (term.length < 2) {
       setState(() {
-        items = <LawItem>[];
         status =
             'حداقل ۲ حرف وارد کنید';
+
+        items = <LawItem>[];
       });
+
       return;
     }
 
     setState(() {
       searching = true;
+
       items = <LawItem>[];
+
       status =
-          'در حال جستجو برای «$term»...';
+          'در حال آماده‌سازی سامانه...';
     });
 
     try {
+      bool ready =
+          await _waitForSearchPage();
+
+      if (!ready) {
+        await webController.loadRequest(
+          Uri.parse(
+            searchPageUrl,
+          ),
+        );
+
+        ready =
+            await _waitForSearchPage();
+      }
+
+      if (!ready) {
+        throw Exception(
+          'صفحه جستجوی سامانه در WebView آماده نشد',
+        );
+      }
+
+      if (mounted) {
+        setState(() {
+          status =
+              'در حال جستجو برای «$term»...';
+        });
+      }
+
+      final _SearchResponse response =
+          await _requestSearchInWebView(
+        term,
+      );
+
+      debugPrint(
+        'Vakil search HTTP status: '
+        '${response.statusCode}',
+      );
+
+      final String debugBody =
+          response.body.length > 4000
+              ? response.body.substring(
+                  0,
+                  4000,
+                )
+              : response.body;
+
+      debugPrint(
+        'Vakil search response: '
+        '$debugBody',
+      );
+
+      if (response.statusCode < 200 ||
+          response.statusCode >= 300) {
+        throw Exception(
+          'سامانه کد HTTP '
+          '${response.statusCode} برگرداند'
+          '${response.error == null ? '' : '\n${response.error}'}',
+        );
+      }
+
+      if (response.body.trim().isEmpty) {
+        throw Exception(
+          'پاسخ خالی از سامانه دریافت شد',
+        );
+      }
+
       final List<LawItem> results =
-          await getResults(term);
+          _parseResponse(
+        response.body,
+      );
 
       if (!mounted) return;
 
       setState(() {
         items = results;
 
-        if (results.isEmpty) {
-          status =
-              'برای «$term» نتیجه‌ای پیدا نشد';
-        } else {
-          status =
-              '${results.length} نتیجه پیدا شد';
-        }
+        status = results.isEmpty
+            ? 'برای «$term» نتیجه‌ای پیدا نشد'
+            : '${results.length} نتیجه پیدا شد';
       });
-    } catch (e) {
+    } catch (error) {
+      debugPrint(
+        'Vakil search error: $error',
+      );
+
       if (!mounted) return;
 
       setState(() {
         items = <LawItem>[];
+
         status =
-            'خطا در دریافت اطلاعات\n$e';
+            'خطا در جستجو\n$error';
       });
     } finally {
       if (!mounted) return;
@@ -464,9 +716,10 @@ class _SearchPageState extends State<SearchPage> {
     }
   }
 
-  void openLaw(LawItem item) {
-    Navigator.push(
-      context,
+  void openLaw(
+    LawItem item,
+  ) {
+    Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) => LawPage(
           title: item.title,
@@ -483,9 +736,12 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(
+    BuildContext context,
+  ) {
     return Directionality(
-      textDirection: TextDirection.rtl,
+      textDirection:
+          TextDirection.rtl,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('وکیل'),
@@ -497,25 +753,26 @@ class _SearchPageState extends State<SearchPage> {
               child: IgnorePointer(
                 child: Opacity(
                   opacity: 0.01,
-                  child:
-                      WebViewWidget(
+                  child: WebViewWidget(
                     controller:
                         webController,
                   ),
                 ),
               ),
             ),
-
             Container(
-              color:
-                  Theme.of(context)
-                      .scaffoldBackgroundColor,
+              color: Theme.of(
+                context,
+              ).scaffoldBackgroundColor,
               child: Column(
                 children: [
                   Padding(
                     padding:
-                        const EdgeInsets.all(
+                        const EdgeInsets.fromLTRB(
                       16,
+                      18,
+                      16,
+                      10,
                     ),
                     child: TextField(
                       controller:
@@ -534,6 +791,8 @@ class _SearchPageState extends State<SearchPage> {
                         ),
                         suffixIcon:
                             IconButton(
+                          tooltip:
+                              'جستجو',
                           icon:
                               const Icon(
                             Icons.search,
@@ -548,7 +807,6 @@ class _SearchPageState extends State<SearchPage> {
                       ),
                     ),
                   ),
-
                   Padding(
                     padding:
                         const EdgeInsets.symmetric(
@@ -564,11 +822,9 @@ class _SearchPageState extends State<SearchPage> {
                       ),
                     ),
                   ),
-
                   const SizedBox(
-                    height: 10,
+                    height: 8,
                   ),
-
                   Expanded(
                     child: searching
                         ? const Center(
@@ -577,8 +833,7 @@ class _SearchPageState extends State<SearchPage> {
                           )
                         : items.isEmpty
                             ? Center(
-                                child:
-                                    Padding(
+                                child: Padding(
                                   padding:
                                       const EdgeInsets.all(
                                     24,
@@ -599,16 +854,18 @@ class _SearchPageState extends State<SearchPage> {
                                     items.length,
                                 separatorBuilder:
                                     (
-                                  context,
-                                  index,
+                                  BuildContext
+                                      context,
+                                  int index,
                                 ) =>
                                         const SizedBox(
                                   height: 8,
                                 ),
                                 itemBuilder:
                                     (
-                                  context,
-                                  index,
+                                  BuildContext
+                                      context,
+                                  int index,
                                 ) {
                                   final LawItem
                                       item =
@@ -618,6 +875,13 @@ class _SearchPageState extends State<SearchPage> {
                                     elevation: 2,
                                     child:
                                         ListTile(
+                                      contentPadding:
+                                          const EdgeInsets
+                                              .symmetric(
+                                        horizontal:
+                                            16,
+                                        vertical: 10,
+                                      ),
                                       title:
                                           Text(
                                         item.title,
@@ -632,20 +896,24 @@ class _SearchPageState extends State<SearchPage> {
                                       subtitle:
                                           Padding(
                                         padding:
-                                            const EdgeInsets.only(
-                                          top: 6,
+                                            const EdgeInsets
+                                                .only(
+                                          top: 8,
                                         ),
                                         child:
                                             Column(
                                           crossAxisAlignment:
-                                              CrossAxisAlignment.start,
+                                              CrossAxisAlignment
+                                                  .start,
                                           children: [
-                                            if (item.date
+                                            if (item
+                                                .date
                                                 .isNotEmpty)
                                               Text(
                                                 'تاریخ: ${item.date}',
                                               ),
-                                            if (item.type
+                                            if (item
+                                                .type
                                                 .isNotEmpty)
                                               Text(
                                                 'نوع: ${item.type}',
@@ -659,8 +927,7 @@ class _SearchPageState extends State<SearchPage> {
                                             .chevron_left,
                                       ),
                                       onTap:
-                                          () =>
-                                              openLaw(
+                                          () => openLaw(
                                         item,
                                       ),
                                     ),
@@ -695,7 +962,8 @@ class LawPage extends StatefulWidget {
 
 class _LawPageState
     extends State<LawPage> {
-  late final WebViewController controller;
+  late final WebViewController
+      controller;
 
   bool loading = true;
 
@@ -706,6 +974,11 @@ class _LawPageState
     controller = WebViewController()
       ..setJavaScriptMode(
         JavaScriptMode.unrestricted,
+      )
+      ..setUserAgent(
+        'Mozilla/5.0 (Linux; Android 13; Mobile) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) '
+        'Chrome/124.0.0.0 Mobile Safari/537.36',
       )
       ..setNavigationDelegate(
         NavigationDelegate(
@@ -725,6 +998,10 @@ class _LawPageState
               loading = false;
             });
           },
+          onWebResourceError:
+              (WebResourceError error) {
+            // خطاهای منابع جانبی نادیده گرفته می‌شوند.
+          },
         ),
       )
       ..loadRequest(
@@ -741,14 +1018,18 @@ class _LawPageState
           TextDirection.rtl,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text(
-            'متن قانون',
+          title: Text(
+            widget.title,
+            maxLines: 1,
+            overflow:
+                TextOverflow.ellipsis,
           ),
         ),
         body: Stack(
           children: [
             WebViewWidget(
-              controller: controller,
+              controller:
+                  controller,
             ),
             if (loading)
               const Center(
